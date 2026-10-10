@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { LayoutDashboard, Package, MapPin, Store, LogOut, Menu, X, TriangleAlert } from "lucide-react";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { ChangePasswordDialog } from "@/components/change-password-dialog";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 
@@ -92,7 +93,8 @@ export function AppShell({
           <div className="hidden lg:block" />
           <div className="flex items-center gap-3">
             <ThemeToggle />
-            <span className="text-sm text-gray-700 dark:text-gray-300">{nama}</span>
+            <span className="hidden text-sm text-gray-700 dark:text-gray-300 sm:inline">{nama}</span>
+            <ChangePasswordDialog />
             <button
               onClick={handleLogout}
               aria-label="Logout"
