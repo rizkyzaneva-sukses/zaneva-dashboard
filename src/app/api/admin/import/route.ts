@@ -8,17 +8,19 @@ import { Prisma } from "@/generated/prisma/client";
  * lewat HTTPS (tidak perlu membuka port Postgres ke publik / SSH ke server).
  *
  * Auth : header `Authorization: Bearer <IMPORT_SECRET>` (env wajib, minimal 16 karakter).
- * Body : { mode: "replace" | "append", orders?: [...], reviews?: [...] }
- *        orders[]  -> satu objek per baris orders_clean.csv (orderKey/orderW sudah dihitung klien)
+ * Body : { mode: "replace" | "append", orders?: [...], reviews?: [...], users?: [...] }
+ *        orders[]  -> satu objek per baris orders_clean.csv (orderKey/orderW dihitung klien)
  *        reviews[] -> satu objek per baris product_review.csv
+ *        users[]   -> opsional, baris users (untuk bootstrap admin pertama)
  *
+ * Skema tabel dibuat otomatis (idempotent) di awal, jadi DB yang masih kosong
+ * bisa langsung diisi tanpa menjalankan migrasi terpisah.
  * Klien mengirim per-batch (±5000 baris). mode "replace" hanya pada batch pertama:
- * tabel di-TRUNCATE sekali, batch berikutnya "append". Aman dijalankan ulang dari nol.
+ * tabel di-TRUNCATE sekali, batch berikutnya "append".
  */
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-// Batas waktu eksplisit (detik) untuk platform yang menghormatinya.
 export const maxDuration = 120;
 
 const MARKETPLACES = new Set([
@@ -50,6 +52,75 @@ function bearer(req: Request): string {
   const h = req.headers.get("authorization") ?? "";
   const m = /^Bearer\s+(.+)$/i.exec(h.trim());
   return m ? m[1].trim() : "";
+}
+
+/** DDL idempotent: menyiapkan tabel/enum/index kalau belum ada. */
+async function ensureSchema(prisma: ReturnType<typeof getPrisma>) {
+  const ddl: string[] = [
+    `DO $$ BEGIN
+       CREATE TYPE "Marketplace" AS ENUM ('SHOPEE','TIKTOK','CASH_COD','LAINNYA','LAZADA','BOOTH','KOMUNITAS','KANTOR');
+     EXCEPTION WHEN duplicate_object THEN null; END $$`,
+    `CREATE TABLE IF NOT EXISTS "orders" (
+       id text PRIMARY KEY,
+       "orderNo" text NOT NULL,
+       resi text,
+       "orderDate" date NOT NULL,
+       "paymentMethod" text,
+       sku text NOT NULL,
+       qty integer DEFAULT 1 NOT NULL,
+       revenue numeric(15,2) NOT NULL,
+       "shippingCost" numeric(15,2),
+       city text,
+       district text,
+       province text,
+       "platformRaw" text NOT NULL,
+       brand text NOT NULL,
+       marketplace "Marketplace" NOT NULL,
+       "sourceFile" text NOT NULL,
+       "createdAt" timestamp(3) DEFAULT CURRENT_TIMESTAMP NOT NULL,
+       "updatedAt" timestamp(3) NOT NULL,
+       account text,
+       category text,
+       venue text,
+       "orderKey" integer DEFAULT 0 NOT NULL,
+       "orderW" double precision DEFAULT 1 NOT NULL
+     )`,
+    `CREATE TABLE IF NOT EXISTS "product_reviews" (
+       id text PRIMARY KEY,
+       kind text NOT NULL,
+       name text NOT NULL,
+       rows integer NOT NULL,
+       omzet numeric(15,2) NOT NULL,
+       suggestions text,
+       note text,
+       "resultSku" text,
+       "createdAt" timestamp(3) DEFAULT CURRENT_TIMESTAMP NOT NULL
+     )`,
+    `CREATE TABLE IF NOT EXISTS "users" (
+       id text PRIMARY KEY,
+       nama text NOT NULL,
+       username text NOT NULL,
+       "passwordHash" text NOT NULL,
+       "isActive" boolean DEFAULT true NOT NULL,
+       "lastLoginAt" timestamp(3),
+       "createdAt" timestamp(3) DEFAULT CURRENT_TIMESTAMP NOT NULL,
+       "updatedAt" timestamp(3) NOT NULL
+     )`,
+    `CREATE INDEX IF NOT EXISTS orders_account_idx ON "orders" (account)`,
+    `CREATE INDEX IF NOT EXISTS orders_brand_idx ON "orders" (brand)`,
+    `CREATE INDEX IF NOT EXISTS orders_category_idx ON "orders" (category)`,
+    `CREATE INDEX IF NOT EXISTS orders_city_idx ON "orders" (city)`,
+    `CREATE INDEX IF NOT EXISTS orders_district_idx ON "orders" (district)`,
+    `CREATE INDEX IF NOT EXISTS orders_marketplace_idx ON "orders" (marketplace)`,
+    `CREATE INDEX IF NOT EXISTS "orders_orderDate_idx" ON "orders" ("orderDate")`,
+    `CREATE INDEX IF NOT EXISTS "orders_orderNo_idx" ON "orders" ("orderNo")`,
+    `CREATE INDEX IF NOT EXISTS orders_sku_idx ON "orders" (sku)`,
+    `CREATE INDEX IF NOT EXISTS product_reviews_kind_idx ON "product_reviews" (kind)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS users_username_key ON "users" (username)`,
+  ];
+  for (const stmt of ddl) {
+    await prisma.$executeRawUnsafe(stmt);
+  }
 }
 
 interface OrderIn {
@@ -149,7 +220,7 @@ function siapkanOrder(r: OrderIn, i: number): BarisOrder {
 }
 
 export async function POST(req: Request) {
-  const SECRET = process.env.IMPORT_SECRET ?? "";
+  const SECRET=process.env.IMPORT_SECRET ?? "";
   if (SECRET.length < 16) {
     return json(
       { error: "IMPORT_SECRET belum diatur (minimal 16 karakter) di environment app." },
@@ -166,21 +237,25 @@ export async function POST(req: Request) {
   } catch {
     return json({ error: "Body bukan JSON valid" }, 400);
   }
-  const { mode, orders, reviews } = (body ?? {}) as {
+  const { mode, orders, reviews, users } = (body ?? {}) as {
     mode?: unknown;
     orders?: unknown;
     reviews?: unknown;
+    users?: unknown;
   };
   const ganti = mode === "replace";
 
   if (orders !== undefined && !Array.isArray(orders)) return json({ error: "orders harus array" }, 400);
   if (reviews !== undefined && !Array.isArray(reviews)) return json({ error: "reviews harus array" }, 400);
+  if (users !== undefined && !Array.isArray(users)) return json({ error: "users harus array" }, 400);
   if (Array.isArray(orders) && orders.length > MAX_BATCH)
     return json({ error: `orders melebihi ${MAX_BATCH} baris per batch` }, 413);
 
   const prisma = getPrisma();
 
   try {
+    await ensureSchema(prisma);
+
     if (ganti) {
       // TRUNCATE instan (deleteMany pada 489k baris bisa melewati statement_timeout).
       await prisma.$executeRawUnsafe('TRUNCATE TABLE "orders", "product_reviews" RESTART IDENTITY CASCADE');
@@ -208,16 +283,34 @@ export async function POST(req: Request) {
       await prisma.productReview.createMany({ data });
     }
 
+    let userDimasukkan = 0;
+    if (Array.isArray(users) && users.length > 0) {
+      const data = (users as Record<string, unknown>[]).map((u) => ({
+        id: str(u.id),
+        nama: str(u.nama),
+        username: str(u.username),
+        passwordHash: str(u.passwordHash),
+        isActive: u.isActive === undefined ? true : Boolean(u.isActive),
+        lastLoginAt: u.lastLoginAt ? new Date(str(u.lastLoginAt)) : null,
+      }));
+      userDimasukkan = data.length;
+      // skipDuplicates -> ON CONFLICT DO NOTHING (username unik menahan duplikat).
+      await prisma.user.createMany({ data, skipDuplicates: true });
+    }
+
     const total = await prisma.order.count();
     const totalReview = await prisma.productReview.count();
+    const totalUser = await prisma.user.count();
 
     return json({
       ok: true,
       mode: ganti ? "replace" : "append",
       dimasukkan,
       reviewDimasukkan,
+      userDimasukkan,
       totalOrders: total,
       totalReviews: totalReview,
+      totalUsers: totalUser,
     });
   } catch (e) {
     const pesan = e instanceof Error ? e.message : "gagal";
