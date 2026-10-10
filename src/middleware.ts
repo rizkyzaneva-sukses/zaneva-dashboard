@@ -3,7 +3,8 @@ import { unsealData } from "iron-session";
 
 // Cocok persis atau sebagai awalan segmen ("/api/auth" cocok "/api/auth/login",
 // tapi tidak "/api/authx").
-const PUBLIC_PATHS = ["/login", "/api/auth", "/api/health"];
+// "/api/admin" punya autentikasi sendiri (Bearer IMPORT_SECRET), jadi lewati cek sesi cookie.
+const PUBLIC_PATHS = ["/login", "/api/auth", "/api/health", "/api/admin"];
 
 const SESSION_TTL = 60 * 60 * 24 * 7;
 const DEV_SECRET = "dev_only_password_at_least_32_characters_long";
