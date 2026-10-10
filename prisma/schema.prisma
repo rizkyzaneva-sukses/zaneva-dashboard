@@ -1,0 +1,92 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id           String    @id @default(cuid())
+  nama         String
+  username     String    @unique
+  passwordHash String
+  isActive     Boolean   @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@map("users")
+}
+
+/// Daftar nama produk yang perlu konfirmasi (hasil ETL): belum cocok master, atau cocok otomatis.
+model ProductReview {
+  id          String   @id @default(cuid())
+  kind        String
+  name        String
+  rows        Int
+  omzet       Decimal  @db.Decimal(15, 2)
+  suggestions String?
+  note        String?
+  resultSku   String?
+  createdAt   DateTime @default(now())
+
+  @@index([kind])
+  @@map("product_reviews")
+}
+
+enum Marketplace {
+  SHOPEE
+  TIKTOK
+  LAZADA
+  BOOTH
+  KOMUNITAS
+  KANTOR
+  CASH_COD
+  LAINNYA
+}
+
+/// Satu baris = satu SKU di dalam satu pesanan (grain sama dengan laporan app lama).
+model Order {
+  id           String      @id @default(cuid())
+
+  orderNo      String
+  resi         String?
+  orderDate    DateTime    @db.Date
+  paymentMethod String?
+
+  sku          String
+  qty          Int         @default(1)
+  revenue      Decimal     @db.Decimal(15, 2)
+  shippingCost Decimal?    @db.Decimal(15, 2)
+
+  city         String?
+  district     String?
+  province     String?
+
+  platformRaw  String
+  marketplace  Marketplace
+  account      String?
+  brand        String
+  category     String?
+  venue        String?
+  orderKey     Int         @default(0)
+  orderW       Float       @default(1)
+
+  sourceFile   String
+
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  @@index([orderDate])
+  @@index([brand])
+  @@index([marketplace])
+  @@index([account])
+  @@index([category])
+  @@index([district])
+  @@index([sku])
+  @@index([city])
+  @@index([orderNo])
+  @@map("orders")
+}

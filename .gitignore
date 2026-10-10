@@ -1,0 +1,24 @@
+node_modules
+.next
+out
+build
+.env
+.env.*
+!.env.example
+src/generated
+*.log
+*.tsbuildinfo
+next-env.d.ts
+.DS_Store
+coverage
+# Data & dump database (berisi data penjualan asli)
+data/
+pindah-pc/*.dump
+*.dump
+*.pkl
+*.xlsx
+__pycache__/
+
+# Tooling lokal & kit pindah PC (berisi password/dump)
+.claude/
+pindah-pc/
